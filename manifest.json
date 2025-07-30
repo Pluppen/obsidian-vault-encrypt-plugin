@@ -1,11 +1,10 @@
 {
 	"id": "vault-encrypt",
 	"name": "Vault Encrypt",
-	"version": "0.0.3",
-	"minAppVersion": "0.0.3",
+	"version": "0.0.4",
+	"minAppVersion": "1.8.0",
 	"description": "Encrypts and decrypts the contents of the vault using a password.",
 	"author": "Pluppen",
 	"authorUrl": "https://pluppen.com",
-	"fundingUrl": "https://github.com/Pluppen/obsidian-vault-encrypt-plugin",
 	"isDesktopOnly": true
 }

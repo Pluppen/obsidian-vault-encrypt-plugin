@@ -563,16 +563,11 @@ class PasswordModal extends Modal {
 
     const inputEl = contentEl.createEl('input', {
       type: 'password',
-      placeholder: 'Enter vault password...'
+      placeholder: 'Enter vault password...',
+	  cls: 'input-element'
     });
     
-    inputEl.style.width = '100%';
-    inputEl.style.marginBottom = '16px';
-
-    const buttonContainer = contentEl.createDiv();
-    buttonContainer.style.display = 'flex';
-    buttonContainer.style.gap = '8px';
-
+    const buttonContainer = contentEl.createDiv({cls: 'button-container'});
     const submitBtn = buttonContainer.createEl('button', { text: 'Submit' });
     const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
 
@@ -759,16 +754,10 @@ class ConfirmationModal extends Modal {
     contentEl.createEl('h2', { text: this.title });
     contentEl.createEl('p', { text: this.message });
 
-    const buttonContainer = contentEl.createDiv();
-    buttonContainer.style.display = 'flex';
-    buttonContainer.style.gap = '8px';
-    buttonContainer.style.marginTop = '16px';
+    const buttonContainer = contentEl.createDiv({cls: 'button-container-top-margin'});
 
     const confirmBtn = buttonContainer.createEl('button', { text: 'Encrypt Vault' });
     const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
-
-    confirmBtn.style.backgroundColor = '#e74c3c';
-    confirmBtn.style.color = 'white';
 
     confirmBtn.onclick = () => {
       this.close();

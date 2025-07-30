@@ -1,0 +1,21 @@
+.input-element {
+	width: 100%;
+	margin-bottom: var(--size-4-4);
+}
+
+.button-container {
+	display: flex;
+	gap: var(--size-4-2);
+}
+
+.button-container-top-margin {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-4);
+
+}
+
+.confirm-button {
+	background-color: var(--background-modifier-error);
+	color: var(--color-base-00);
+}
