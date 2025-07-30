@@ -21,6 +21,30 @@ Files remain encrypted (or decrypted) after the Obsidian app closes.
 
 ---
 
+### Usage Guide
+#### Basic Operations
+Manual Encryption/Decryption
+
+Encrypt Vault: Click the lock icon in the ribbon or use Command Palette (Ctrl/Cmd + P → "Encrypt entire vault")
+Enter Password: Use a strong, memorable password (minimum 8 characters recommended)
+Decryption: Use the same methods with your master password
+
+#### Security Configuration
+##### Encryption Strength
+
+Standard Security: 100,000 PBKDF2 iterations (default)
+High Security: 250,000 iterations (slower but more secure)
+Maximum Security: 500,000 iterations (recommended for sensitive data)
+
+##### Password Guidelines
+
+Minimum Length: 12+ characters
+Composition: Mix of uppercase, lowercase, numbers, and symbols
+Uniqueness: Use a password manager for unique, strong passwords
+Storage: Never store the master password in plain text
+
+---
+
 ### Usability
 This plugin has not gone through an security audit and should not be relied upon for critical security applications.
 
