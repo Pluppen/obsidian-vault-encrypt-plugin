@@ -5,7 +5,7 @@
 	"minAppVersion": "0.0.3",
 	"description": "Encrypts and decrypts the contents of the vault using a password.",
 	"author": "Pluppen",
-	"authorUrl": "https://github.com/Pluppen/obsidian-vault-encrypt-plugin",
+	"authorUrl": "https://pluppen.com",
 	"fundingUrl": "https://github.com/Pluppen/obsidian-vault-encrypt-plugin",
 	"isDesktopOnly": true
 }
