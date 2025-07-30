@@ -32,16 +32,16 @@ Decryption: Use the same methods with your master password
 #### Security Configuration
 ##### Encryption Strength
 
-Standard Security: 100,000 PBKDF2 iterations (default)
-High Security: 250,000 iterations (slower but more secure)
-Maximum Security: 500,000 iterations (recommended for sensitive data)
+- Standard Security: 100,000 PBKDF2 iterations (default)
+- High Security: 250,000 iterations (slower but more secure)
+- Maximum Security: 500,000 iterations (recommended for sensitive data)
 
 ##### Password Guidelines
 
-Minimum Length: 12+ characters
-Composition: Mix of uppercase, lowercase, numbers, and symbols
-Uniqueness: Use a password manager for unique, strong passwords
-Storage: Never store the master password in plain text
+- Recommended Minimum Length: 12+ characters
+- Composition: Mix of uppercase, lowercase, numbers, and symbols
+- Uniqueness: Use a password manager for unique, strong passwords
+- Storage: Never store the master password in plain text
 
 ---
 
