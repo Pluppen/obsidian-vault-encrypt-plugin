@@ -1,5 +1,5 @@
 {
-	"id": "vault-encrypt-plugin",
+	"id": "vault-encrypt",
 	"name": "Vault Encrypt",
 	"version": "0.0.3",
 	"minAppVersion": "0.0.3",
