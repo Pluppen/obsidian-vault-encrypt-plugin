@@ -1,0 +1,3 @@
+# Obsidian Vault Encrypt Plugin
+
+
