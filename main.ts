@@ -1,14 +1,11 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Menu } from 'obsidian';
-
-const DEFAULT_SETTINGS: VaultEncryptionSettings = {
-  encryptionIterations: 100000,
-  showWarnings: true,
-  autoBackup: true
-};
+import { App, Plugin, Setting, Modal, Notice, TFile, TFolder, Menu, PluginSettingTab } from 'obsidian';
 
 interface FilenameMapping {
   original: string;
   encrypted: string;
+  fileIndex: number;
+  sizePadding: number;
+  originalSize: number;
   timestamp: string;
 }
 
@@ -25,20 +22,420 @@ interface ParsedMappingFile {
   content: string | null;
 }
 
+interface EncryptionBatch {
+  files: TFile[];
+  startIndex: number;
+  endIndex: number;
+}
+
 type StatusCallback = (current: number, total: number, status: string) => void;
 
 class SecureVaultEncryption {
-  private app: App;
-  private readonly algorithm = 'AES-GCM';
-  private readonly ivLength = 12;  // 96 bits (recommended for GCM)
-  private readonly saltLength = 32; // 256 bits
-  private readonly iterations = 100000; // PBKDF2 iterations
+  protected app: App;
+  protected readonly algorithm = 'AES-GCM';
+  protected readonly ivLength = 12;  // 96 bits (recommended for GCM)
+  protected readonly saltLength = 32; // 256 bits
+  protected readonly iterations = 100000; // PBKDF2 iterations
+  private readonly batchSize = 10; // Process 10 files concurrently
+  private readonly paddingSizes = [1024, 4096, 16384, 32768]; // Standard padding sizes
+  private masterKey: CryptoKey | null = null;
 
   constructor(app: App) {
     this.app = app;
   }
 
-  private async deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+  private async deriveMasterKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(password),
+      'PBKDF2',
+      false,
+      ['deriveBits']
+    );
+
+    const derivedBits = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        salt: salt,
+        iterations: this.iterations,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      256
+    );
+
+    return crypto.subtle.importKey(
+      'raw',
+      derivedBits,
+      'HKDF',
+      false,
+      ['deriveKey']
+    );
+  }
+
+  private async deriveFileKey(masterKey: CryptoKey, fileIndex: number): Promise<CryptoKey> {
+    const info = new TextEncoder().encode(`file-${fileIndex}`);
+    
+    return crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(0),
+        info: info
+      },
+      masterKey,
+      { name: this.algorithm, length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  private async encryptTextWithFileKey(text: string, fileKey: CryptoKey): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    
+    const iv = crypto.getRandomValues(new Uint8Array(this.ivLength));
+    
+    const encrypted = await crypto.subtle.encrypt(
+      { name: this.algorithm, iv: iv },
+      fileKey,
+      data
+    );
+    
+    const result = new Uint8Array(iv.length + encrypted.byteLength);
+    result.set(iv, 0);
+    result.set(new Uint8Array(encrypted), iv.length);
+    
+    return this.arrayBufferToBase64(result);
+  }
+
+  private async decryptTextWithFileKey(encryptedBase64: string, fileKey: CryptoKey): Promise<string> {
+    const encryptedData = this.base64ToArrayBuffer(encryptedBase64);
+    const dataView = new Uint8Array(encryptedData);
+    
+    const iv = dataView.slice(0, this.ivLength);
+    const encrypted = dataView.slice(this.ivLength);
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: this.algorithm, iv: iv },
+      fileKey,
+      encrypted
+    );
+    
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+  }
+
+  private calculateSizePadding(originalSize: number): number {
+    for (const paddingSize of this.paddingSizes) {
+      if (originalSize <= paddingSize * 0.8) { // Use 80% of padding size
+        return paddingSize - originalSize;
+      }
+    }
+    const boundary = 65536;
+    return boundary - (originalSize % boundary);
+  }
+
+  private addSizePadding(content: string, paddingSize: number): string {
+    if (paddingSize <= 0) return content;
+    
+    const padding = '<!--PADDING:' + 'X'.repeat(paddingSize - 20) + '-->';
+    return content + '\n\n' + padding;
+  }
+
+  private removeSizePadding(content: string): string {
+    const paddingRegex = /\n\n<!--PADDING:X+-->$/;
+    return content.replace(paddingRegex, '');
+  }
+
+  async encryptVault(password: string, statusCallback?: StatusCallback): Promise<EncryptionResult> {
+    const startTime = Date.now();
+    const allFiles = this.app.vault.getFiles();
+    
+    const filesToEncrypt = allFiles.filter(f => 
+      !f.name.startsWith('enc_') && 
+      f.name !== 'vault_mapping.encrypted'
+    );
+
+    if (filesToEncrypt.length === 0) {
+      throw new Error('No files to encrypt');
+    }
+
+    statusCallback?.(0, filesToEncrypt.length, 'Deriving master key...');
+
+    const masterSalt = crypto.getRandomValues(new Uint8Array(this.saltLength));
+    this.masterKey = await this.deriveMasterKey(password, masterSalt);
+
+    const batches: EncryptionBatch[] = [];
+    for (let i = 0; i < filesToEncrypt.length; i += this.batchSize) {
+      batches.push({
+        files: filesToEncrypt.slice(i, i + this.batchSize),
+        startIndex: i,
+        endIndex: Math.min(i + this.batchSize, filesToEncrypt.length)
+      });
+    }
+
+    const filenameMapping: FilenameMapping[] = [];
+    const encryptedFiles: string[] = [];
+    let processed = 0;
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      statusCallback?.(processed, filesToEncrypt.length, 
+        `Encrypting batch ${batchIndex + 1}/${batches.length}...`);
+
+      // Process batch in parallel
+      const batchPromises = batch.files.map(async (file, indexInBatch) => {
+        const fileIndex = batch.startIndex + indexInBatch;
+        
+        try {
+          const encryptedFilename = this.generateEncryptedFilename();
+          
+          const originalContent = await this.app.vault.read(file);
+          const originalSize = new TextEncoder().encode(originalContent).length;
+          
+          const sizePadding = this.calculateSizePadding(originalSize);
+          const paddedContent = this.addSizePadding(originalContent, sizePadding);
+          
+          const fileKey = await this.deriveFileKey(this.masterKey!, fileIndex);
+          const encryptedContent = await this.encryptTextWithFileKey(paddedContent, fileKey);
+          
+          const mappingEntry: FilenameMapping = {
+            original: file.path,
+            encrypted: encryptedFilename,
+            fileIndex: fileIndex,
+            sizePadding: sizePadding,
+            originalSize: originalSize,
+            timestamp: new Date().toISOString()
+          };
+
+          const formattedContent = this.formatAnonymousEncryptedFile(encryptedContent);
+          
+          return {
+            file,
+            encryptedFilename,
+            formattedContent,
+            mappingEntry
+          };
+          
+        } catch (error) {
+          throw new Error(`Failed to encrypt ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      
+      for (const result of batchResults) {
+        await this.app.vault.create(result.encryptedFilename, result.formattedContent);
+        await this.app.vault.delete(result.file);
+        
+        filenameMapping.push(result.mappingEntry);
+        encryptedFiles.push(result.encryptedFilename);
+        processed++;
+      }
+    }
+
+    await this.removeAllFolders();
+
+    statusCallback?.(processed, filesToEncrypt.length, 'Creating filename mapping...');
+    
+    const mappingData = {
+      salt: Array.from(masterSalt),
+      mappings: filenameMapping
+    };
+    
+    const encryptedMapping = await this.encryptText(JSON.stringify(mappingData, null, 2), password);
+    const mappingContent = this.formatMappingFile(encryptedMapping);
+    await this.app.vault.create('vault_mapping.encrypted', mappingContent);
+
+    this.masterKey = null;
+
+    const totalTime = (Date.now() - startTime) / 1000;
+    statusCallback?.(processed, filesToEncrypt.length, 
+      `Encryption complete! (${totalTime.toFixed(1)}s, ${processed} files)`);
+      
+    return { encryptedFiles, mappingCreated: true };
+  }
+
+  async decryptVault(password: string, statusCallback?: StatusCallback): Promise<string[]> {
+    const startTime = Date.now();
+    
+    statusCallback?.(0, 1, 'Reading filename mapping...');
+    
+    const mappingFile = this.app.vault.getAbstractFileByPath('vault_mapping.encrypted');
+    if (!mappingFile || !(mappingFile instanceof TFile)) {
+      throw new Error('Filename mapping not found. Cannot decrypt vault.');
+    }
+    
+    const mappingContent = await this.app.vault.read(mappingFile);
+    const { content: encryptedMapping } = this.parseMappingFile(mappingContent);
+    
+    if (!encryptedMapping) {
+      throw new Error('Invalid mapping file format');
+    }
+
+    statusCallback?.(0, 1, 'Decrypting filename mapping...');
+    
+    let mappingData;
+    try {
+      const decryptedMappingJson = await this.decryptText(encryptedMapping, password);
+      mappingData = JSON.parse(decryptedMappingJson);
+    } catch (error) {
+      throw new Error('Failed to decrypt mapping - invalid password');
+    }
+
+    const masterSalt = new Uint8Array(mappingData.salt);
+    const filenameMapping: FilenameMapping[] = mappingData.mappings;
+    
+    statusCallback?.(0, 1, 'Deriving master key...');
+    this.masterKey = await this.deriveMasterKey(password, masterSalt);
+
+    const encryptedFiles = this.app.vault.getFiles().filter(f => 
+      f.name.startsWith('enc_') && f.name.endsWith('.md')
+    );
+
+    const mappingByFilename = new Map(filenameMapping.map(m => [m.encrypted, m]));
+    const validFiles = encryptedFiles.filter(f => mappingByFilename.has(f.name));
+    
+    const batches: TFile[][] = [];
+    for (let i = 0; i < validFiles.length; i += this.batchSize) {
+      batches.push(validFiles.slice(i, i + this.batchSize));
+    }
+
+    const decryptedFiles: string[] = [];
+    let processed = 0;
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      statusCallback?.(processed, validFiles.length, 
+        `Decrypting batch ${batchIndex + 1}/${batches.length}...`);
+
+      const batchPromises = batch.map(async (file) => {
+        const mappingEntry = mappingByFilename.get(file.name);
+        if (!mappingEntry) return null;
+
+        try {
+          const encryptedContent = await this.app.vault.read(file);
+          const { content: encryptedData } = this.parseAnonymousEncryptedFile(encryptedContent);
+          
+          if (!encryptedData) {
+            throw new Error('Invalid encrypted file format');
+          }
+          
+          const fileKey = await this.deriveFileKey(this.masterKey!, mappingEntry.fileIndex);
+          let decryptedContent = await this.decryptTextWithFileKey(encryptedData, fileKey);
+          
+          decryptedContent = this.removeSizePadding(decryptedContent);
+          
+          return {
+            file,
+            originalPath: mappingEntry.original,
+            decryptedContent
+          };
+          
+        } catch (error) {
+          throw new Error(`Failed to decrypt ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      
+      for (const result of batchResults) {
+        if (!result) continue;
+        
+        const dirPath = result.originalPath.substring(0, result.originalPath.lastIndexOf('/'));
+        if (dirPath) {
+          await this.ensureDirectoryExists(dirPath);
+        }
+        
+        await this.app.vault.create(result.originalPath, result.decryptedContent);
+        await this.app.vault.delete(result.file);
+        
+        decryptedFiles.push(result.originalPath);
+        processed++;
+      }
+    }
+
+    await this.app.vault.delete(mappingFile);
+    this.masterKey = null;
+
+    const totalTime = (Date.now() - startTime) / 1000;
+    statusCallback?.(processed, validFiles.length, 
+      `Decryption complete! Original structure restored. (${totalTime.toFixed(1)}s, ${processed} files)`);
+      
+    return decryptedFiles;
+  }
+
+  private formatAnonymousEncryptedFile(encryptedBase64: string): string {
+    return `
+> ⚠️ **This file contains encrypted data**  
+> Use the Vault Encryption plugin to decrypt.
+
+\`\`\`encrypted
+${this.formatBase64WithLineBreaks(encryptedBase64)}
+\`\`\`
+
+`;
+  }
+
+  private formatMappingFile(encryptedMapping: string): string {
+    return `
+\`\`\`mapping
+${this.formatBase64WithLineBreaks(encryptedMapping)}
+\`\`\``;
+  }
+
+  private parseAnonymousEncryptedFile(content: string): ParsedEncryptedFile {
+    const match = content.match(/```encrypted\n([\s\S]*?)\n```/);
+    if (!match) {
+      return { content: null };
+    }
+    return { content: match[1].replace(/\s/g, '') };
+  }
+
+  private parseMappingFile(content: string): ParsedMappingFile {
+    const match = content.match(/```mapping\n([\s\S]*?)\n```/);
+    if (!match) {
+      return { content: null };
+    }
+    return { content: match[1].replace(/\s/g, '') };
+  }
+
+  private async removeAllFolders(): Promise<void> {
+    const allFolders = this.app.vault.getAllLoadedFiles()
+      .filter(f => f instanceof TFolder)
+      .map(f => f as TFolder)
+      .sort((a, b) => b.path.length - a.path.length);
+
+    for (const folder of allFolders) {
+      try {
+        await this.app.vault.delete(folder);
+      } catch (error) {
+        console.debug(`Could not delete folder ${folder.path}:`, error);
+      }
+    }
+  }
+
+  private async ensureDirectoryExists(dirPath: string): Promise<void> {
+    if (this.app.vault.getAbstractFileByPath(dirPath)) {
+      return;
+    }
+    
+    const folders = dirPath.split('/');
+    let currentPath = '';
+    
+    for (const folder of folders) {
+      currentPath += (currentPath ? '/' : '') + folder;
+      if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+        await this.app.vault.createFolder(currentPath);
+      }
+    }
+  }
+
+  protected async deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
     const encoder = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey(
       'raw',
@@ -91,31 +488,23 @@ class SecureVaultEncryption {
     }
   }
 
-  /**
-   * Decrypts base64 content
-   */
   async decryptText(encryptedBase64: string, password: string): Promise<string> {
     try {
-      // Convert from base64
       const encryptedData = this.base64ToArrayBuffer(encryptedBase64);
       const dataView = new Uint8Array(encryptedData);
       
-      // Extract components
       const salt = dataView.slice(0, this.saltLength);
       const iv = dataView.slice(this.saltLength, this.saltLength + this.ivLength);
       const encrypted = dataView.slice(this.saltLength + this.ivLength);
       
-      // Derive key
       const key = await this.deriveKey(password, salt);
       
-      // Decrypt
       const decrypted = await crypto.subtle.decrypt(
         { name: this.algorithm, iv: iv },
         key,
         encrypted
       );
       
-      // Convert back to text
       const decoder = new TextDecoder();
       return decoder.decode(decrypted);
       
@@ -125,301 +514,13 @@ class SecureVaultEncryption {
     }
   }
 
-  /**
-   * Generates a secure random filename
-   */
-  private generateEncryptedFilename(): string {
-    const randomBytes = crypto.getRandomValues(new Uint8Array(16));
-    const base64 = btoa(String.fromCharCode(...randomBytes))
-      .replace(/[^a-zA-Z0-9]/g, '') // Remove special characters
-      .substring(0, 12); // Keep reasonable length
-    return `enc_${base64}.md`;
-  }
-
-  /**
-   * Creates a filename mapping entry
-   */
-  private createFilenameMapping(originalPath: string, encryptedFilename: string): FilenameMapping {
-    return {
-      original: originalPath,
-      encrypted: encryptedFilename,
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  /**
-   * Encrypts the filename mapping
-   */
-  private async encryptFilenameMapping(mappings: FilenameMapping[], password: string): Promise<string> {
-    const mappingJson = JSON.stringify(mappings, null, 2);
-    return await this.encryptText(mappingJson, password);
-  }
-
-  /**
-   * Decrypts the filename mapping
-   */
-  private async decryptFilenameMapping(encryptedMapping: string, password: string): Promise<FilenameMapping[]> {
-    const decryptedJson = await this.decryptText(encryptedMapping, password);
-    return JSON.parse(decryptedJson) as FilenameMapping[];
-  }
-
-  /**
-   * Encrypts an entire vault
-   */
-  async encryptVault(password: string, statusCallback?: StatusCallback): Promise<EncryptionResult> {
-    const files = this.app.vault.getFiles();
-    const encryptedFiles: string[] = [];
-    const filenameMapping: FilenameMapping[] = [];
-    let processed = 0;
-
-    // Skip already encrypted files and mapping file
-    const filesToEncrypt = files.filter(f => 
-      !f.name.startsWith('enc_') && 
-      f.name !== 'vault_mapping.encrypted'
-    );
-
-    for (const file of filesToEncrypt) {
-      try {
-        statusCallback?.(processed, filesToEncrypt.length, `Encrypting: ${file.name}`);
-
-        // Generate encrypted filename
-        const encryptedFilename = this.generateEncryptedFilename();
-        
-        // Read file content
-        const content = await this.app.vault.read(file);
-        
-        // Encrypt content
-        const encryptedContent = await this.encryptText(content, password);
-        
-        // Create filename mapping entry
-        const mappingEntry = this.createFilenameMapping(file.path, encryptedFilename);
-        filenameMapping.push(mappingEntry);
-        
-        // Format as encrypted file (without revealing original name)
-        const formattedContent = this.formatEncryptedFile(encryptedContent, encryptedFilename);
-        
-        // Create encrypted file with random name
-        await this.app.vault.create(encryptedFilename, formattedContent);
-        
-        // Delete original file
-        await this.app.vault.delete(file);
-        
-        encryptedFiles.push(encryptedFilename);
-        processed++;
-        
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`Failed to encrypt ${file.name}:`, error);
-        throw new Error(`Failed to encrypt ${file.name}: ${errorMessage}`);
-      }
-    }
-
-    // Create and encrypt the filename mapping
-    try {
-      statusCallback?.(processed, filesToEncrypt.length, 'Creating filename mapping...');
-      
-      const encryptedMapping = await this.encryptFilenameMapping(filenameMapping, password);
-      const mappingContent = this.formatMappingFile(encryptedMapping);
-      
-      await this.app.vault.create('vault_mapping.encrypted', mappingContent);
-      
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Failed to create filename mapping:', error);
-      throw new Error(`Failed to create filename mapping: ${errorMessage}`);
-    }
-
-    statusCallback?.(processed, filesToEncrypt.length, 'Encryption complete');
-    return { encryptedFiles, mappingCreated: true };
-  }
-
-  /**
-   * Decrypts entire vault
-   */
-  async decryptVault(password: string, statusCallback?: StatusCallback): Promise<string[]> {
-    // First, decrypt the filename mapping
-    let filenameMapping: FilenameMapping[] = [];
-    
-    try {
-      statusCallback?.(0, 1, 'Reading filename mapping...');
-      
-      const mappingFile = this.app.vault.getAbstractFileByPath('vault_mapping.encrypted');
-	  console.log(mappingFile)
-      if (!mappingFile || !(mappingFile instanceof TFile)) {
-        throw new Error('Filename mapping not found. Cannot decrypt vault.');
-      }
-      
-      const mappingContent = await this.app.vault.read(mappingFile);
-      const { content: encryptedMapping } = this.parseMappingFile(mappingContent);
-      
-      if (!encryptedMapping) {
-        throw new Error('Invalid mapping file format');
-      }
-      
-      filenameMapping = await this.decryptFilenameMapping(encryptedMapping, password);
-      
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Failed to decrypt filename mapping:', error);
-      throw new Error(`Failed to decrypt filename mapping: ${errorMessage}`);
-    }
-
-    // Get all encrypted files
-    const encryptedFiles = this.app.vault.getFiles().filter(f => 
-      f.name.startsWith('enc_') && f.name.endsWith('.md')
-    );
-    
-    const decryptedFiles: string[] = [];
-    let processed = 0;
-
-    for (const file of encryptedFiles) {
-      try {
-        statusCallback?.(processed, encryptedFiles.length, `Decrypting: ${file.name}`);
-
-        // Find original filename from mapping
-        const mappingEntry = filenameMapping.find(m => m.encrypted === file.name);
-        if (!mappingEntry) {
-          console.warn(`No mapping found for ${file.name}, skipping...`);
-          continue;
-        }
-
-        // Read encrypted file
-        const encryptedContent = await this.app.vault.read(file);
-        
-        // Parse encrypted content
-        const { content: encryptedData } = this.parseEncryptedFile(encryptedContent);
-        
-        if (!encryptedData) {
-          throw new Error('Invalid encrypted file format');
-        }
-        
-        // Decrypt content
-        const decryptedContent = await this.decryptText(encryptedData, password);
-        
-        // Restore original file with original name
-        const originalPath = mappingEntry.original;
-        
-        // Ensure directory exists
-        const dirPath = originalPath.substring(0, originalPath.lastIndexOf('/'));
-        if (dirPath && !this.app.vault.getAbstractFileByPath(dirPath)) {
-          // Create intermediate folders if needed
-          const folders = dirPath.split('/');
-          let currentPath = '';
-          for (const folder of folders) {
-            currentPath += (currentPath ? '/' : '') + folder;
-            if (!this.app.vault.getAbstractFileByPath(currentPath)) {
-              await this.app.vault.createFolder(currentPath);
-            }
-          }
-        }
-        
-        await this.app.vault.create(originalPath, decryptedContent);
-        
-        // Delete encrypted file
-        await this.app.vault.delete(file);
-        
-        decryptedFiles.push(originalPath);
-        processed++;
-        
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`Failed to decrypt ${file.name}:`, error);
-        throw new Error(`Failed to decrypt ${file.name}: ${errorMessage}`);
-      }
-    }
-
-    // Delete the mapping file
-    try {
-      const mappingFile = this.app.vault.getAbstractFileByPath('vault_mapping.encrypted');
-      if (mappingFile) {
-        await this.app.vault.delete(mappingFile);
-      }
-    } catch (error) {
-      console.warn('Failed to delete mapping file:', error);
-    }
-
-    statusCallback?.(processed, encryptedFiles.length, 'Decryption complete');
-    return decryptedFiles;
-  }
-
-  /**
-   * Formats encrypted content for Obsidian (no filename revealed)
-   */
-  private formatEncryptedFile(encryptedBase64: string, encryptedFilename: string): string {
-    const timestamp = new Date().toISOString();
-    
-    return `
-> ⚠️ **This file is encrypted**  
-> Use the Vault Encryption plugin to decrypt this content.  
-> Original filename is hidden for security.
-
-\`\`\`encrypted
-${this.formatBase64WithLineBreaks(encryptedBase64)}
-\`\`\`
-
----
-*Encrypted with Obsidian Vault Encryption Plugin*`;
-  }
-
-  /**
-   * Formats the filename mapping file
-   */
-  private formatMappingFile(encryptedMapping: string): string {
-    const timestamp = new Date().toISOString();
-    
-    return `
-> ⚠️ **This file contains encrypted filename mappings**  
-> Do not delete this file - it's required to decrypt your vault.  
-> Original filenames and paths are encrypted within.
-
-\`\`\`mapping
-${this.formatBase64WithLineBreaks(encryptedMapping)}
-\`\`\`
-
----
-*Generated by Obsidian Vault Encryption Plugin*`;
-  }
-
-  /**
-   * Parses encrypted file back to data (updated for new format)
-   */
-  private parseEncryptedFile(content: string): ParsedEncryptedFile {
-    const match = content.match(/```encrypted\n([\s\S]*?)\n```/);
-    if (!match) {
-      return { content: null };
-    }
-
-    // Clean up base64 data
-    const base64Data = match[1].replace(/\s/g, '');
-    
-    return { content: base64Data };
-  }
-
-  /**
-   * Parses filename mapping file
-   */
-  private parseMappingFile(content: string): ParsedMappingFile {
-    const match = content.match(/```mapping\n([\s\S]*?)\n```/);
-    if (!match) {
-      return { content: null };
-    }
-
-    // Clean up base64 data
-    const base64Data = match[1].replace(/\s/g, '');
-    
-    return { content: base64Data };
-  }
-
-  /**
-   * Utility functions
-   */
-  private formatBase64WithLineBreaks(base64: string, lineLength: number = 64): string {
+  protected formatBase64WithLineBreaks(base64: string, lineLength: number = 64): string {
     const regex = new RegExp(`.{1,${lineLength}}`, 'g');
     const matches = base64.match(regex);
     return matches ? matches.join('\n') : base64;
   }
 
-  private arrayBufferToBase64(buffer: ArrayBuffer): string {
+  protected arrayBufferToBase64(buffer: ArrayBuffer): string {
     const bytes = new Uint8Array(buffer);
     let binary = '';
     for (let i = 0; i < bytes.byteLength; i++) {
@@ -428,13 +529,21 @@ ${this.formatBase64WithLineBreaks(encryptedMapping)}
     return btoa(binary);
   }
 
-  private base64ToArrayBuffer(base64: string): ArrayBuffer {
+  protected base64ToArrayBuffer(base64: string): ArrayBuffer {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
     return bytes.buffer;
+  }
+
+  protected generateEncryptedFilename(): string {
+    const randomBytes = crypto.getRandomValues(new Uint8Array(16));
+    const base64 = btoa(String.fromCharCode(...randomBytes))
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .substring(0, 12);
+    return `enc_${base64}.md`;
   }
 }
 
@@ -494,23 +603,38 @@ interface VaultEncryptionSettings {
   encryptionIterations: number;
   showWarnings: boolean;
   autoBackup: boolean;
+  autoEncryptOnClose: boolean;
+  autoDecryptOnLoad: boolean;
+  rememberPassword: boolean;
+  passwordTimeout: number; // minutes
 }
+
+const DEFAULT_SETTINGS: VaultEncryptionSettings = {
+  encryptionIterations: 100000,
+  showWarnings: true,
+  autoBackup: true,
+  autoEncryptOnClose: false,
+  autoDecryptOnLoad: false,
+  rememberPassword: false,
+  passwordTimeout: 30
+};
 
 export default class VaultEncryptionPlugin extends Plugin {
   private encryption!: SecureVaultEncryption;
   settings!: VaultEncryptionSettings;
+  private isEncrypted: boolean = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     
     this.encryption = new SecureVaultEncryption(this.app);
 
-    // Add ribbon icon
+    this.checkVaultEncryptionStatus();
+
     this.addRibbonIcon('lock', 'Vault Encryption', (evt: MouseEvent) => {
       this.showEncryptionMenu(evt);
     });
 
-    // Add commands
     this.addCommand({
       id: 'encrypt-vault',
       name: 'Encrypt entire vault',
@@ -523,10 +647,7 @@ export default class VaultEncryptionPlugin extends Plugin {
       callback: () => this.decryptVault()
     });
 
-    // Add settings tab
     this.addSettingTab(new VaultEncryptionSettingTab(this.app, this));
-
-    console.log('Vault Encryption Plugin loaded');
   }
 
   async loadSettings(): Promise<void> {
@@ -535,6 +656,12 @@ export default class VaultEncryptionPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  private checkVaultEncryptionStatus(): void {
+    const mappingFile = this.app.vault.getAbstractFileByPath('vault_mapping.encrypted');
+    const hasEncryptedFiles = this.app.vault.getFiles().some(f => f.name.startsWith('enc_'));
+    this.isEncrypted = mappingFile !== null || hasEncryptedFiles;
   }
 
   showEncryptionMenu(evt: MouseEvent): void {
@@ -560,7 +687,7 @@ export default class VaultEncryptionPlugin extends Plugin {
       // Show warning dialog first
       const confirmModal = new ConfirmationModal(
         this.app,
-        'Encrypt Vault',
+        '⚠️ Encrypt Vault',
         'This will encrypt ALL files in your vault with random filenames. Make sure you have a backup!',
         () => this.performEncryption()
       );
@@ -571,7 +698,7 @@ export default class VaultEncryptionPlugin extends Plugin {
   }
 
   private performEncryption(): void {
-    new PasswordModal(this.app, 'Encrypt Vault', async (password: string) => {
+    new PasswordModal(this.app, '🔒 Encrypt Vault', async (password: string) => {
       const notice = new Notice('Encrypting vault...', 0);
       
       try {
@@ -579,6 +706,7 @@ export default class VaultEncryptionPlugin extends Plugin {
           notice.setMessage(`${status} (${current}/${total})`);
         });
         
+        this.isEncrypted = true;
         notice.hide();
         new Notice('Vault encrypted successfully!');
         
@@ -600,6 +728,7 @@ export default class VaultEncryptionPlugin extends Plugin {
           notice.setMessage(`${status} (${current}/${total})`);
         });
         
+        this.isEncrypted = false;
         notice.hide();
         new Notice('Vault decrypted successfully!');
         
@@ -610,10 +739,6 @@ export default class VaultEncryptionPlugin extends Plugin {
         console.error('Decryption error:', error);
       }
     }).open();
-  }
-
-  onunload(): void {
-    console.log('Vault Encryption Plugin unloaded');
   }
 }
 
@@ -670,6 +795,7 @@ class VaultEncryptionSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
 	new Setting(containerEl).setName('Vault Encryption Settings').setHeading();
 
     new Setting(containerEl)
