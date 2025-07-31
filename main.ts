@@ -407,12 +407,13 @@ ${this.formatBase64WithLineBreaks(encryptedMapping)}
   private async removeAllFolders(): Promise<void> {
     const allFolders = this.app.vault.getAllLoadedFiles()
       .filter(f => f instanceof TFolder)
-      .map(f => f as TFolder)
       .sort((a, b) => b.path.length - a.path.length);
 
     for (const folder of allFolders) {
       try {
-        await this.app.vault.delete(folder);
+		if (folder instanceof TFolder) {
+			await this.app.fileManager.trashFile(folder);
+		}
       } catch (error) {
         console.debug(`Could not delete folder ${folder.path}:`, error);
       }
