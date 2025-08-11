@@ -229,15 +229,12 @@ class SecureVaultEncryption {
       
       for (const result of batchResults) {
         await this.app.vault.create(result.encryptedFilename, result.formattedContent);
-        await this.app.vault.delete(result.file);
-        
         filenameMapping.push(result.mappingEntry);
         encryptedFiles.push(result.encryptedFilename);
         processed++;
       }
     }
 
-    await this.removeAllFolders();
 
     statusCallback?.(processed, filesToEncrypt.length, 'Creating filename mapping...');
     
@@ -249,6 +246,12 @@ class SecureVaultEncryption {
     const encryptedMapping = await this.encryptText(JSON.stringify(mappingData, null, 2), password);
     const mappingContent = this.formatMappingFile(encryptedMapping);
     await this.app.vault.create('vault_mapping.encrypted', mappingContent);
+
+	// Remove all files after vault_mapping has been created
+    for (let i = 0; i < filesToEncrypt.length; i += this.batchSize) {
+	  await this.app.vault.delete(filesToEncrypt[i]);
+    }
+    await this.removeAllFolders()
 
     this.masterKey = null;
 
