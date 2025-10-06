@@ -1,7 +1,7 @@
 {
 	"id": "vault-encrypt",
 	"name": "Vault Encrypt",
-	"version": "0.0.6",
+	"version": "0.0.7",
 	"minAppVersion": "1.8.0",
 	"description": "Encrypts and decrypts the contents of the vault using a password.",
 	"author": "Pluppen",
