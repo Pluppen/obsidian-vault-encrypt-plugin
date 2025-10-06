@@ -1,4 +1,4 @@
-# Obsidian Vault Encrypt Plugin
+# Vault Encrypt Plugin
 Transform your vault into an unrecognizable collection of encrypted files that provides security and anonymity while maintaining seamless user experience.
 
 ---
@@ -10,7 +10,7 @@ Transform your vault into an unrecognizable collection of encrypted files that p
 
 ---
 
-### Obsidian Vault Encryption Installation & Use
+### Vault Encryption Installation & Use
 Manual Installation: Copy over main.js and manifest.json (from Releases) to your vault in this location: `VaultFolder/.obsidian/plugins/cryptsidian/`.
 
 Git Clone: `git clone` this repository into `VaultFolder/.obsidian/plugins/cryptsidian` and `npm install` and `npm run dev`.

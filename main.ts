@@ -1,4 +1,4 @@
-import { App, Plugin, Setting, Modal, Notice, TFile, TFolder, Menu, PluginSettingTab } from 'obsidian';
+import { App, Plugin, Setting, Modal, Notice, TFile, TFolder, Menu, PluginSettingTab, arrayBufferToBase64, ButtonComponent } from 'obsidian';
 
 interface FilenameMapping {
   original: string;
@@ -107,7 +107,7 @@ class SecureVaultEncryption {
     result.set(iv, 0);
     result.set(new Uint8Array(encrypted), iv.length);
     
-    return this.arrayBufferToBase64(result);
+    return arrayBufferToBase64(result);
   }
 
   private async decryptTextWithFileKey(encryptedBase64: string, fileKey: CryptoKey): Promise<string> {
@@ -428,15 +428,7 @@ ${this.formatBase64WithLineBreaks(encryptedMapping)}
       return;
     }
     
-    const folders = dirPath.split('/');
-    let currentPath = '';
-    
-    for (const folder of folders) {
-      currentPath += (currentPath ? '/' : '') + folder;
-      if (!this.app.vault.getAbstractFileByPath(currentPath)) {
-        await this.app.vault.createFolder(currentPath);
-      }
-    }
+    await this.app.vault.createFolder(dirPath);
   }
 
   protected async deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
@@ -484,7 +476,7 @@ ${this.formatBase64WithLineBreaks(encryptedMapping)}
       result.set(iv, salt.length);
       result.set(new Uint8Array(encrypted), salt.length + iv.length);
       
-      return this.arrayBufferToBase64(result);
+      return arrayBufferToBase64(result);
       
     } catch (error) {
       console.error('Encryption failed:', error);
@@ -522,15 +514,6 @@ ${this.formatBase64WithLineBreaks(encryptedMapping)}
     const regex = new RegExp(`.{1,${lineLength}}`, 'g');
     const matches = base64.match(regex);
     return matches ? matches.join('\n') : base64;
-  }
-
-  protected arrayBufferToBase64(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
   }
 
   protected base64ToArrayBuffer(base64: string): ArrayBuffer {
@@ -667,13 +650,13 @@ export default class VaultEncryptionPlugin extends Plugin {
     const menu = new Menu();
     
     menu.addItem((item) =>
-      item.setTitle('Encrypt Vault')
+      item.setTitle('Encrypt vault')
           .setIcon('lock')
           .onClick(() => this.encryptVault())
     );
 
     menu.addItem((item) =>
-      item.setTitle('Decrypt Vault')
+      item.setTitle('Decrypt vault')
           .setIcon('unlock')
           .onClick(() => this.decryptVault())
     );
@@ -686,7 +669,7 @@ export default class VaultEncryptionPlugin extends Plugin {
       // Show warning dialog first
       const confirmModal = new ConfirmationModal(
         this.app,
-        '⚠️ Encrypt Vault',
+        '⚠️ Encrypt vault',
         'This will encrypt ALL files in your vault with random filenames. Make sure you have a backup!',
         () => this.performEncryption()
       );
@@ -697,7 +680,7 @@ export default class VaultEncryptionPlugin extends Plugin {
   }
 
   private performEncryption(): void {
-    new PasswordModal(this.app, '🔒 Encrypt Vault', async (password: string) => {
+    new PasswordModal(this.app, '🔒 Encrypt vault', async (password: string) => {
       const notice = new Notice('Encrypting vault...', 0);
       
       try {
@@ -719,7 +702,7 @@ export default class VaultEncryptionPlugin extends Plugin {
   }
 
   async decryptVault(): Promise<void> {
-    new PasswordModal(this.app, 'Decrypt Vault', async (password: string) => {
+    new PasswordModal(this.app, 'Decrypt vault', async (password: string) => {
       const notice = new Notice('Decrypting vault...', 0);
       
       try {
@@ -760,14 +743,12 @@ class ConfirmationModal extends Modal {
 
     const buttonContainer = contentEl.createDiv({cls: 'button-container-top-margin'});
 
-    const confirmBtn = buttonContainer.createEl('button', { text: 'Encrypt Vault' });
-    const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
-
-    confirmBtn.onclick = () => {
+	new ButtonComponent(buttonContainer).setButtonText('Encrypt vault').setWarning().onClick(() => {
       this.close();
       this.onConfirm();
-    };
+	})
 
+    const cancelBtn = buttonContainer.createEl('button', { text: 'Cancel' });
     cancelBtn.onclick = () => this.close();
   }
 
@@ -789,10 +770,8 @@ class VaultEncryptionSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-	new Setting(containerEl).setName('Vault Encryption Settings').setHeading();
-
     new Setting(containerEl)
-      .setName('PBKDF2 Iterations')
+      .setName('PBKDF2 iterations')
       .setDesc('Higher values are more secure but slower (default: 100,000)')
       .addSlider(slider => slider
         .setLimits(50000, 500000, 10000)
@@ -804,7 +783,7 @@ class VaultEncryptionSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('Show Warning Dialogs')
+      .setName('Show warning Dialogs')
       .setDesc('Show confirmation dialogs before encryption operations')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.showWarnings)
@@ -814,7 +793,7 @@ class VaultEncryptionSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('Auto Backup Reminder')
+      .setName('Auto backup Reminder')
       .setDesc('Remind to backup before encryption (recommended)')
       .addToggle(toggle => toggle
         .setValue(this.plugin.settings.autoBackup)
