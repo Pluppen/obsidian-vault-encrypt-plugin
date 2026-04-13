@@ -247,9 +247,9 @@ class SecureVaultEncryption {
     const mappingContent = this.formatMappingFile(encryptedMapping);
     await this.app.vault.create('vault_mapping.encrypted', mappingContent);
 
-	// Remove all files after vault_mapping has been created
-    for (let i = 0; i < filesToEncrypt.length; i += this.batchSize) {
-	  await this.app.vault.delete(filesToEncrypt[i]);
+    // Remove all files after vault_mapping has been created
+    for (const file of filesToEncrypt) {
+      await this.app.vault.delete(file);
     }
     await this.removeAllFolders()
 
